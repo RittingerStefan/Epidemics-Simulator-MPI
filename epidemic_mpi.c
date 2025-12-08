@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include "mpi.h"
 
 // #define DEBUG
 
@@ -39,43 +40,40 @@ FILE* input_file = NULL;
 char* file_name;
 int max_coord_x, max_coord_y;
 int people_number;
-person_t **people_serial;
+person_t *people_serial, *people_mpi;
 
-person_t* generate_person(int id, int x, int y, int init_status, int pattern, int amplitude) {
-    person_t* person = malloc(sizeof(person_t));
-    if(person == NULL) {
-        printf("Not enough memory to declare another person.\n");
-        return NULL;
-    }
+person_t generate_person(int id, int x, int y, int init_status, int pattern, int amplitude) {
+    person_t person;
     
-    person->id = id;
+    person.id = id;
     if(x < 0 || y < 0 || x > max_coord_x || y > max_coord_y) {
         printf("Coordinates are out of bounds.\n");
-        return NULL;
+        exit(-6);
     }
-    person->x = x; person->y = y;
+    person.x = x; person.y = y;
 
     switch(pattern) {
         case CARDINAL_N:
-            person->movement_pattern = DIR_VERTICAL; person->amplitude = -1 * amplitude;
+            person.movement_pattern = DIR_VERTICAL; person.amplitude = -1 * amplitude;
             break;
         case CARDINAL_S:
-            person->movement_pattern = DIR_VERTICAL; person->amplitude = amplitude;
+            person.movement_pattern = DIR_VERTICAL; person.amplitude = amplitude;
             break;
         case CARDINAL_E:
-            person->movement_pattern = DIR_HORIZONTAL; person->amplitude = amplitude;
+            person.movement_pattern = DIR_HORIZONTAL; person.amplitude = amplitude;
             break;
         case CARDINAL_W:
-            person->movement_pattern = DIR_HORIZONTAL; person->amplitude = -1 * amplitude;
+            person.movement_pattern = DIR_HORIZONTAL; person.amplitude = -1 * amplitude;
             break;
         default:
             printf("Undefined movement pattern.\n");
-            return NULL;
+            exit(-6);
     }
 
-    person->status = init_status;
-    person->timer_infected = TIME_INFECTED; person->timer_immune = TIME_IMMUNE;
-    person->count_infected = 0;
+    person.status = init_status;
+    person.timer_infected = TIME_INFECTED; person.timer_immune = TIME_IMMUNE;
+    person.count_infected = 0;
+    person.got_infected = 0;
 
     return person;
 }
@@ -96,7 +94,7 @@ void handle_arguments(char* argv[]) {
     strncpy(file_name, argv[2], strlen(argv[2]));
 }
 
-person_t* get_person_data_from_string(char* string, int line) {
+person_t get_person_data_from_string(char* string, int line) {
     char* strtok_pointer;
     int id, x, y, status, pattern, amplitude;
     errno = 0;
@@ -122,6 +120,7 @@ void read_input_from_file() {
     }
 
     char* buffer = malloc(BUFFER_SIZE * sizeof(char));
+    char* buffer_copy = malloc(BUFFER_SIZE * sizeof(char));
     char* strtok_pointer;
 
     fgets(buffer, BUFFER_SIZE, input_file);
@@ -140,21 +139,23 @@ void read_input_from_file() {
     }
 
     people_serial = malloc(people_number * sizeof(person_t));
+    people_mpi = malloc(people_number * sizeof(person_t));
     for(int i = 0; i < people_number; i++) {
         fgets(buffer, BUFFER_SIZE, input_file);
+        strncpy(buffer_copy, buffer, strlen(buffer));
         people_serial[i] = get_person_data_from_string(buffer, i);
+        people_mpi[i] = get_person_data_from_string(buffer_copy, i);
     }
 
     free(buffer);
+    free(buffer_copy);
 }
 
 void cleanup() {
     fclose(input_file);
     free(file_name);
-    for(int i = 0; i < people_number; i++) {
-        free(people_serial[i]);
-    }
     free(people_serial);
+    free(people_mpi);
 }
 
 void update_position(person_t* person) {
@@ -190,11 +191,11 @@ void update_position(person_t* person) {
     person->amplitude = amplitude;
 }
 
-void infect_neighbors(person_t* infected_person, person_t** people) {
+void infect_neighbors(person_t infected_person, person_t* people) {
     for(int i = 0; i < people_number; i++)
-        if(people[i]->x == infected_person->x && people[i]->y == infected_person->y 
-           && people[i]->id != infected_person->id && people[i]->status == STAT_SUSCEPTIBLE)
-                people[i]->got_infected = 1;
+        if(people[i].x == infected_person.x && people[i].y == infected_person.y 
+           && people[i].id != infected_person.id && people[i].status == STAT_SUSCEPTIBLE)
+                people[i].got_infected = 1;
 }
 
 void set_next_status(person_t* person) {
@@ -216,10 +217,10 @@ void set_next_status(person_t* person) {
     }    
 }
 
-void print_person_data(person_t* person) {
+void print_person_data(person_t person) {
     char status[15] = "";
 
-    switch(person->status) {
+    switch(person.status) {
         case STAT_SUSCEPTIBLE:
             strcpy(status, "SUSCEPTIBLE");
             break;
@@ -231,10 +232,10 @@ void print_person_data(person_t* person) {
             break;
     }
 
-    printf("Person %d: (%d, %d), status: %s, was infected %d time(s).\n", person->id, person->x, person->y, status, person->count_infected);
+    printf("Person %d: (%d, %d), status: %s, was infected %d time(s).\n", person.id, person.x, person.y, status, person.count_infected);
 }
 
-void write_result_in_file(char* append, person_t** people) {
+void write_result_in_file(char* append, person_t* people) {
     char* file_name_copy = malloc(sizeof(char) * strlen(file_name));
     strncpy(file_name_copy, file_name, strlen(file_name));
 
@@ -253,7 +254,7 @@ void write_result_in_file(char* append, person_t** people) {
     }
 
     for(int i = 0; i < people_number; i++) {
-        switch(people[i]->status) {
+        switch(people[i].status) {
             case STAT_SUSCEPTIBLE:
                 strcpy(status, "SUSCEPTIBLE");
                 break;
@@ -264,7 +265,7 @@ void write_result_in_file(char* append, person_t** people) {
                 strcpy(status, "IMMUNE");
                 break;
         }
-        fprintf(write_file, "Person %d: (%d, %d), status: %s, was infected %d time(s).\n", people[i]->id, people[i]->x, people[i]->y, status, people[i]->count_infected);
+        fprintf(write_file, "Person %d: (%d, %d), status: %s, was infected %d time(s).\n", people[i].id, people[i].x, people[i].y, status, people[i].count_infected);
     }
     printf("Results printed in file: %s\n", new_file_name);
     free(new_file_name);
@@ -272,19 +273,37 @@ void write_result_in_file(char* append, person_t** people) {
     fclose(write_file);
 }
 
+int check_equal(person_t p1, person_t p2) {
+    if(p1.id != p2.id) return 0;
+    if(p1.x != p2.x) return 0;
+    if(p1.y != p2.y) return 0;
+    if(p1.status != p2.status) return 0;
+    if(p1.count_infected != p2.count_infected) return 0;
+
+    return 1;
+}
+
+int check_if_same_result() {
+    for(int i = 0; i < people_number; i++)
+        if(!check_equal(people_mpi[i], people_serial[i])) {
+            return i + 1;
+        }
+    return -1;
+}
+
 
 void epidemic_simulation_serial() {
     for(int time = 0; time < simulation_time; time++) {
         
         for(int i = 0; i < people_number; i++) 
-            update_position(people_serial[i]);
+            update_position(&people_serial[i]);
 
         for(int i = 0; i < people_number; i++)
-            if(people_serial[i]->status == STAT_INFECTED)
+            if(people_serial[i].status == STAT_INFECTED)
                 infect_neighbors(people_serial[i], people_serial);
 
         for(int i = 0; i < people_number; i++) 
-            set_next_status(people_serial[i]);
+            set_next_status(&people_serial[i]);
 
 #ifdef DEBUG
         for(int i = 0; i < people_number; i++)
@@ -302,19 +321,30 @@ int main(int argc, char** argv) {
 
     struct timespec start;
     struct timespec end;
+    int comm_size, my_rank;
     double time_serial, time_parallel;
+    MPI_Datatype MPI_Person;
 
-    handle_arguments(argv);
-    read_input_from_file();
+    MPI_Init(&argc, &argv);
+    MPI_Type_contiguous(10, MPI_INT, &MPI_Person);
+    MPI_Type_commit(&MPI_Person);
+    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    epidemic_simulation_serial();
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    time_serial = end.tv_sec - start.tv_sec;
-    time_serial += (end.tv_nsec - start.tv_nsec) / NANO;
-    printf("Time for serial: %lf\n", time_serial);
-    write_result_in_file("_serial_out.txt", people_serial);
-    
-    cleanup();
+    if(my_rank == 0) {
+        handle_arguments(argv);
+        read_input_from_file();
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        epidemic_simulation_serial();
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        time_serial = end.tv_sec - start.tv_sec;
+        time_serial += (end.tv_nsec - start.tv_nsec) / NANO;
+        printf("Time for serial: %lf\n", time_serial);
+        write_result_in_file("_serial_out.txt", people_serial);
+        cleanup();
+    }
+
+    MPI_Finalize();
     return 0;
 }
