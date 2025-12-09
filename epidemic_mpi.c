@@ -41,6 +41,7 @@ char* file_name;
 int max_coord_x, max_coord_y;
 int people_number;
 person_t *people_serial, *people_mpi;
+MPI_Datatype MPI_Person;
 
 person_t generate_person(int id, int x, int y, int init_status, int pattern, int amplitude) {
     person_t person;
@@ -313,6 +314,42 @@ void epidemic_simulation_serial() {
     }
 }
 
+void epidemic_simulation_mpi(int comm_size, int rank) {
+
+    int chunk_size = people_number / comm_size;
+    person_t* chunk = (person_t*)malloc(chunk_size * sizeof(person_t));
+    person_t* recv = NULL;
+
+    MPI_Scatter(people_mpi, chunk_size, MPI_Person, chunk, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
+
+    for(int i = 0; i < chunk_size; i++) {
+        update_position(&chunk[i]);
+    }
+
+    if(rank == 0) {
+        recv = (person_t*)malloc(people_number * sizeof(person_t));
+        
+        if(recv == NULL) {
+            printf("Error creating receive buffer.\n");
+            return;
+        }
+    }
+
+    MPI_Gather(chunk, chunk_size, MPI_Person, recv, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
+
+    if(rank == 0) {
+        for(int i = 0; i < people_number; i++) {
+            print_person_data(recv[i]);
+            printf("\n");
+        }
+    }
+
+    free(chunk);
+    if(rank == 0) {
+        free(recv);
+    }
+}
+
 int main(int argc, char** argv) {
     if(argc < 2) {
         printf("Please provide the following arguments: simulation time, input file name.\n");
@@ -323,7 +360,6 @@ int main(int argc, char** argv) {
     struct timespec end;
     int comm_size, my_rank;
     double time_serial, time_parallel;
-    MPI_Datatype MPI_Person;
 
     MPI_Init(&argc, &argv);
     MPI_Type_contiguous(10, MPI_INT, &MPI_Person);
@@ -333,6 +369,13 @@ int main(int argc, char** argv) {
 
     if(my_rank == 0) {
         handle_arguments(argv);
+        
+        if(people_number % comm_size != 0) {
+            printf("Number of processes is not divisible with number of people!\n");
+            cleanup();
+            return -1;
+        }
+
         read_input_from_file();
 
         clock_gettime(CLOCK_MONOTONIC, &start);
@@ -342,9 +385,19 @@ int main(int argc, char** argv) {
         time_serial += (end.tv_nsec - start.tv_nsec) / NANO;
         printf("Time for serial: %lf\n", time_serial);
         write_result_in_file("_serial_out.txt", people_serial);
-        cleanup();
     }
 
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Bcast(&people_number, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&simulation_time, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&max_coord_x, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&max_coord_y, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    epidemic_simulation_mpi(comm_size, my_rank);
+
     MPI_Finalize();
+    if(my_rank == 0) {
+        cleanup();
+    }
     return 0;
 }
