@@ -40,7 +40,7 @@ FILE* input_file = NULL;
 char* file_name;
 int max_coord_x, max_coord_y;
 int people_number;
-person_t *people_serial, *people_mpi;
+person_t *people_serial, *people_mpi, *recv;
 MPI_Datatype MPI_Person;
 
 person_t generate_person(int id, int x, int y, int init_status, int pattern, int amplitude) {
@@ -156,7 +156,7 @@ void cleanup() {
     fclose(input_file);
     free(file_name);
     free(people_serial);
-    free(people_mpi);
+    free(recv);
 }
 
 void update_position(person_t* person) {
@@ -318,36 +318,46 @@ void epidemic_simulation_mpi(int comm_size, int rank) {
 
     int chunk_size = people_number / comm_size;
     person_t* chunk = (person_t*)malloc(chunk_size * sizeof(person_t));
-    person_t* recv = NULL;
+    recv = NULL;
 
-    MPI_Scatter(people_mpi, chunk_size, MPI_Person, chunk, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
-
-    for(int i = 0; i < chunk_size; i++) {
-        update_position(&chunk[i]);
-    }
-
-    if(rank == 0) {
-        recv = (person_t*)malloc(people_number * sizeof(person_t));
+    for(int i = 0; i < simulation_time; i++) {
         
-        if(recv == NULL) {
-            printf("Error creating receive buffer.\n");
-            return;
+        if(rank == 0) {
+            if(recv == NULL) {
+                recv = (person_t*)malloc(people_number * sizeof(person_t));
+            }
+            
+            if(recv == NULL) {
+                printf("Error creating receive buffer.\n");
+                return;
+            }
+        }
+
+        MPI_Scatter(people_mpi, chunk_size, MPI_Person, chunk, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
+        for(int i = 0; i < chunk_size; i++) {
+            update_position(&chunk[i]);
+        }
+        MPI_Gather(chunk, chunk_size, MPI_Person, recv, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
+
+        if(rank == 0) {
+            free(people_mpi);
+            people_mpi = recv;
+            for(int i = 0; i < people_number; i++)
+                if(people_mpi[i].status == STAT_INFECTED)
+                    infect_neighbors(people_mpi[i], people_mpi);
+        }
+
+        MPI_Scatter(people_mpi, chunk_size, MPI_Person, chunk, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
+        for(int i = 0; i < chunk_size; i++) {
+            set_next_status(&chunk[i]);
+        }
+        MPI_Gather(chunk, chunk_size, MPI_Person, recv, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
+
+        if(rank == 0) {
+            people_mpi = recv;
         }
     }
-
-    MPI_Gather(chunk, chunk_size, MPI_Person, recv, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
-
-    if(rank == 0) {
-        for(int i = 0; i < people_number; i++) {
-            print_person_data(recv[i]);
-            printf("\n");
-        }
-    }
-
     free(chunk);
-    if(rank == 0) {
-        free(recv);
-    }
 }
 
 int main(int argc, char** argv) {
@@ -359,7 +369,7 @@ int main(int argc, char** argv) {
     struct timespec start;
     struct timespec end;
     int comm_size, my_rank;
-    double time_serial, time_parallel;
+    double time_serial, time_mpi;
 
     MPI_Init(&argc, &argv);
     MPI_Type_contiguous(10, MPI_INT, &MPI_Person);
@@ -369,14 +379,13 @@ int main(int argc, char** argv) {
 
     if(my_rank == 0) {
         handle_arguments(argv);
-        
+        read_input_from_file();
+
         if(people_number % comm_size != 0) {
             printf("Number of processes is not divisible with number of people!\n");
             cleanup();
             return -1;
         }
-
-        read_input_from_file();
 
         clock_gettime(CLOCK_MONOTONIC, &start);
         epidemic_simulation_serial();
@@ -393,7 +402,27 @@ int main(int argc, char** argv) {
     MPI_Bcast(&max_coord_x, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&max_coord_y, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
+    clock_gettime(CLOCK_MONOTONIC, &start);
     epidemic_simulation_mpi(comm_size, my_rank);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    time_mpi = end.tv_sec - start.tv_sec;
+    time_mpi += (end.tv_nsec - start.tv_nsec) / NANO;
+    MPI_Barrier(MPI_COMM_WORLD);
+    
+    if(my_rank == 0) {
+        printf("Time for mpi parallel: %lf\n", time_mpi);
+        write_result_in_file("_mpi_out.txt", people_mpi);
+
+        double speedup = time_serial / time_mpi;
+        int error_index = check_if_same_result();
+
+        if(error_index > 0) {
+            printf("!!! RESULTS DO NOT MATCH AT INDEX %d !!!\n", error_index);
+        }
+
+        printf("\nMeasured Speedup: %lf\n", speedup);
+        printf("Measured efficiency: %lf\n", speedup / comm_size);
+    }
 
     MPI_Finalize();
     if(my_rank == 0) {
