@@ -237,16 +237,16 @@ void print_person_data(person_t person) {
 }
 
 void write_result_in_file(char* append, person_t* people) {
-    char* file_name_copy = malloc(sizeof(char) * strlen(file_name));
+    char file_name_copy[strlen(file_name)] = {};
     strncpy(file_name_copy, file_name, strlen(file_name));
 
     char* file_name_no_extension = strtok(file_name_copy, ".");
-    char* new_file_name = malloc(sizeof(char) * (strlen(file_name_no_extension) + strlen(append)));
+    char new_file_name[strlen(file_name_no_extension) + strlen(append)] = {};
     char status[15] = "";
     FILE* write_file;
 
-    strcpy(new_file_name, file_name_no_extension);
-    strcat(new_file_name, append);
+    strncpy(new_file_name, file_name_no_extension, strlen(file_name_no_extension));
+    strncat(new_file_name, append, strlen(append));
     write_file = fopen(new_file_name, "w");
 
     if(write_file == NULL) {
@@ -269,8 +269,6 @@ void write_result_in_file(char* append, person_t* people) {
         fprintf(write_file, "Person %d: (%d, %d), status: %s, was infected %d time(s).\n", people[i].id, people[i].x, people[i].y, status, people[i].count_infected);
     }
     printf("Results printed in file: %s\n", new_file_name);
-    free(new_file_name);
-    free(file_name_copy);
     fclose(write_file);
 }
 
@@ -340,7 +338,9 @@ void epidemic_simulation_mpi(int comm_size, int rank) {
         MPI_Gather(chunk, chunk_size, MPI_Person, recv, chunk_size, MPI_Person, 0, MPI_COMM_WORLD);
 
         if(rank == 0) {
-            free(people_mpi);
+            if(people_mpi != recv) {
+                free(people_mpi);
+            }
             people_mpi = recv;
             for(int i = 0; i < people_number; i++)
                 if(people_mpi[i].status == STAT_INFECTED)
@@ -424,9 +424,9 @@ int main(int argc, char** argv) {
         printf("Measured efficiency: %lf\n", speedup / comm_size);
     }
 
-    MPI_Finalize();
     if(my_rank == 0) {
         cleanup();
     }
+    MPI_Finalize();
     return 0;
 }
